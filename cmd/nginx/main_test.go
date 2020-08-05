@@ -20,7 +20,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -117,6 +119,125 @@ func TestHandleSigterm(t *testing.T) {
 	err = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 	if err != nil {
 		t.Error("Unexpected error sending SIGTERM signal.")
+	}
+}
+
+func startKidProcess() (int, error) {
+	cmd := exec.Command("sleep", "5m")
+	err := cmd.Start()
+	return cmd.Process.Pid, err
+}
+
+func TestHandleSigchld(t *testing.T) {
+	go handleSigchld()
+
+	const children_count = 5
+	var pids []int
+	for i := 0; i < children_count; i++ {
+		pid, err := startKidProcess()
+		if err != nil {
+			t.Error("Cannot start children command: ", err)
+			return
+		}
+		pids = append(pids, pid)
+	}
+	t.Logf("Children PIDS: %v", pids)
+	time.Sleep(1 * time.Second)
+
+	for _, pid := range pids {
+		err := syscall.Kill(pid, syscall.SIGKILL)
+		if err != nil {
+			t.Error("Unexpected error sending SIGKILL signal.")
+		} else {
+			t.Logf("%d killed", pid)
+		}
+	}
+
+	checkZombie := time.Tick(1 * time.Second)
+	timeoutTimer := time.NewTimer(5 * time.Second)
+	defer timeoutTimer.Stop()
+	for {
+		select {
+		case <-timeoutTimer.C:
+			t.Error("Timeout!. Zombie process still there")
+			return
+		case <-checkZombie:
+			deadChildren := 0
+			for _, pid := range pids {
+				if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); os.IsNotExist(err) {
+					deadChildren += 1
+					t.Logf("Process %d die", pid)
+				}
+			}
+			if len(pids) == deadChildren {
+				t.Log("All Processes cleaned")
+				return
+			}
+		}
+	}
+}
+
+func TestHandleSigchldWithMonitoredChildren(t *testing.T) {
+	go handleSigchld()
+
+	const children_count = 5
+	var pids []int
+	pid, err := startKidProcess()
+	if err != nil {
+		t.Error("Cannot start children command: ", err)
+		return
+	}
+	pids = append(pids, pid)
+
+	monitoredCmdIsRunning := true
+	monitoredCmd := exec.Command("sleep", "5m")
+	err = monitoredCmd.Start()
+	if err != nil {
+		t.Error("Cannot start monitoed children command: ", err)
+		return
+	}
+	go func() {
+		monitoredCmd.Wait()
+		monitoredCmdIsRunning = false
+	}()
+
+	pid, err = startKidProcess()
+	if err != nil {
+		t.Error("Cannot start children command: ", err)
+		return
+	}
+	pids = append(pids, pid)
+
+	for _, pid := range pids {
+		err := syscall.Kill(pid, syscall.SIGKILL)
+		if err != nil {
+			t.Error("Unexpected error sending SIGKILL signal.")
+		} else {
+			t.Logf("%d killed", pid)
+		}
+	}
+
+	checkZombie := time.Tick(1 * time.Second)
+	timeoutTimer := time.NewTimer(5 * time.Second)
+	defer timeoutTimer.Stop()
+	for {
+		select {
+		case <-timeoutTimer.C:
+			t.Error("Timeout!. Zombie process still there")
+			return
+		case <-checkZombie:
+			deadChildren := 0
+			for _, pid := range pids {
+				if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); os.IsNotExist(err) {
+					deadChildren += 1
+					t.Logf("Process %d die", pid)
+				}
+			}
+			if len(pids) == deadChildren && monitoredCmdIsRunning {
+				t.Log("All Processes cleaned and the monitored process is running fine")
+				return
+			}
+		}
 	}
 }
 
