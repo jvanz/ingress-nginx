@@ -173,6 +173,7 @@ func main() {
 	go startHTTPServer(conf.ListenPorts.Health, mux)
 	go ngx.Start()
 
+	go handleSigchld()
 	handleSigterm(ngx, func(code int) {
 		os.Exit(code)
 	})
@@ -197,6 +198,22 @@ func handleSigterm(ngx *controller.NGINXController, exit exiter) {
 
 	klog.InfoS("Exiting", "code", exitCode)
 	exit(exitCode)
+}
+
+func handleSigchld() {
+	signalChan := make(chan os.Signal)
+	signal.Notify(signalChan, syscall.SIGCHLD)
+	for {
+		<-signalChan
+		klog.Infof("Children process terminated")
+
+		var wstatus syscall.WaitStatus
+		wpid, _ := syscall.Wait4(-1, &wstatus, syscall.WNOHANG, nil)
+		for wpid > 0 {
+			klog.Infof("Children cleanup.PID: %v, wstatus: %v\n", wpid, wstatus)
+			wpid, _ = syscall.Wait4(-1, &wstatus, syscall.WNOHANG, nil)
+		}
+	}
 }
 
 // createApiserverClient creates a new Kubernetes REST client. apiserverHost is
